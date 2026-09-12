@@ -1,0 +1,43 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      axios:
+        specifier: ^1.6.0
+        version: 1.6.0
+    devDependencies:
+      vite:
+        specifier: ^5.0.0
+        version: 5.0.0(@types/node@20.11.0)
+
+packages:
+
+  '@types/node@20.11.0':
+    resolution: {integrity: sha512-fixturetypesnode==}
+
+  axios@1.6.0:
+    resolution: {integrity: sha512-fixtureaxios==}
+
+  esbuild@0.21.5:
+    resolution: {integrity: sha512-fixtureesbuild==}
+
+  vite@5.0.0:
+    resolution: {integrity: sha512-fixturevite==}
+
+snapshots:
+
+  '@types/node@20.11.0': {}
+
+  axios@1.6.0: {}
+
+  esbuild@0.21.5: {}
+
+  vite@5.0.0(@types/node@20.11.0):
+    dependencies:
+      esbuild: 0.21.5

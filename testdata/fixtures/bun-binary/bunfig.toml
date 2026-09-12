@@ -1,0 +1,9 @@
+# This is how the binary bun.lockb next to it was produced, since bun 1.4 writes a
+# text lockfile by default:
+#
+#   bun install --lockfile-only
+#
+# Keep this file: it documents how to regenerate the fixture, and it is the only way to
+# get a binary lockfile out of a current bun.
+[install]
+saveTextLockfile = false

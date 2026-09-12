@@ -1,0 +1,18 @@
+{
+  "lockfileVersion": 2,
+  "workspaces": {
+    "": {
+      "name": "fixture-workspace-member",
+      "dependencies": {
+        "axios": "^1.6.0",
+        "sibling": "workspace:*",
+        "vendored": "file:../vendored",
+      },
+    },
+  },
+  "packages": {
+    "axios": ["axios@1.6.0", "", {}, "sha512-fixtureaxios=="],
+
+    "sibling": ["sibling@workspace:../sibling"],
+  }
+}

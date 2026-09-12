@@ -1,0 +1,23 @@
+lockfileVersion: '6.0'
+
+dependencies:
+  axios:
+    specifier: ^1.6.0
+    version: 1.6.0
+  '@scope/helper':
+    specifier: ^2.0.0
+    version: 2.1.0
+
+packages:
+
+  /axios@1.6.0:
+    resolution: {integrity: sha512-fixtureaxios==}
+    dev: false
+
+  /@scope/helper@2.1.0:
+    resolution: {integrity: sha512-fixturescoped==}
+    dev: false
+
+  /follow-redirects/1.15.6:
+    resolution: {integrity: sha512-fixturefollow==}
+    dev: false

@@ -1,0 +1,6 @@
+# Test fixtures must stay byte-identical across platforms: line-ending conversion
+# would rewrite lockfiles that the parsers read verbatim.
+testdata/** -text
+
+# The bun lockfile is binary.
+*.lockb binary
