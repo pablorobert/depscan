@@ -516,6 +516,13 @@ advisories/   respostas de audit
 
 TTL e ETag são complementares, não alternativas: usar ambos onde disponíveis.
 
+**Payload gravado comprimido.** O transport do Go descomprime o gzip da resposta de
+forma transparente, então guardar o corpo como veio significa guardar o documento
+inflado — e o envelope JSON ainda aplica base64 por cima, somando mais um terço. Medido
+num `--wanted` sobre 83 projetos: **235 MB cru contra 57 MB comprimido**, 4,1x. Entrada
+que não infla é tratada como corrompida, removida e rebuscada, o que cobre de graça
+qualquer entrada deixada por versão anterior.
+
 Requisitos do cache:
 
 - **transparente** — nenhuma flag necessária para se beneficiar
@@ -524,8 +531,18 @@ Requisitos do cache:
 - **concorrente** — múltiplas instâncias de depscan em paralelo não se corrompem
 - **nunca toca o projeto analisado** — vive só no cache do usuário
 
-MVP expõe apenas `--no-cache`. TTL fica fixo em 6h, configurável em versão futura —
-sem criar flag agora.
+MVP expõe `--no-cache` para ignorar o cache num run, mais dois comandos que agem sobre
+o próprio cache e não recebem diretório:
+
+```
+--list-cache    diretório, contagem por bucket, tamanho total e as entradas mais
+                pesadas, nomeadas pela chave e não pelo hash do arquivo
+--clean-cache   apaga e reporta o que foi liberado
+```
+
+Apagar é sempre seguro: toda entrada é cópia de algo que o registry serve de novo.
+
+TTL fica fixo em 6h, configurável em versão futura — sem criar flag agora.
 
 ### 13.2 `--offline`
 

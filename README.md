@@ -102,6 +102,9 @@ depscan --offline <directory>       # no network at all
 depscan --wanted <directory>        # also compute the highest in-range version
 depscan --only-vulnerable ~/code    # skip the outdated check
 depscan --fail-on high ~/code       # exit 1 only at high or critical
+
+depscan --list-cache                # inspect the cache
+depscan --clean-cache               # delete it
 ```
 
 `depscan --help` documents every flag, the output modes, the exit codes and the
@@ -279,7 +282,33 @@ revalidated with `If-None-Match` instead of re-downloaded. Writes are atomic, so
 concurrent depscan runs cannot corrupt each other, and a corrupt entry is treated as a
 miss and removed.
 
-The cache never touches the scanned project. `--no-cache` bypasses it for one run.
+Payloads are gzipped on disk. Packuments are large and highly repetitive — a full
+`--wanted` run over 83 projects stores 57 MB compressed, against 235 MB raw.
+
+```bash
+depscan --list-cache    # where it lives, what it holds, which entries are heaviest
+depscan --clean-cache   # delete it and report what was freed
+```
+
+```text
+$ depscan --list-cache
+Cache directory
+  /home/user/.cache/depscan
+
+802 entries, 56.7 MB
+
+  registry       797 entries      56.7 MB
+  advisories       5 entries      52.0 KB
+
+Heaviest entries
+      3.5 MB  packument:firebase
+      2.5 MB  packument:next
+      2.1 MB  packument:typescript
+```
+
+Deleting the cache is always safe: every entry is a copy of something the registry can
+serve again, so the next run just pays the cold price. The cache never touches the
+scanned project, and `--no-cache` bypasses it for a single run without removing it.
 
 ## Performance
 
@@ -302,14 +331,20 @@ registry, on Windows:
 83 projects          39 bun · 8 npm · 8 pnpm · 8 yarn · 20 without a lockfile
 400 unique direct dependency names to resolve
 551 unique name@version pairs to audit
+264 of those names need a packument for --wanted (66%)
 
-cold cache           11 s
-warm cache           1.5 s
+                     cold      warm
+default              11 s      1.5 s
+--wanted             31 s      3 s
 ```
 
-The gap between the two is the whole design: a cold run spends almost all its time on
-one `dist-tags` request per unique package name, and a warm run answers those from
-disk. The advisory side costs one POST either way.
+The gap between cold and warm is the whole design: a cold run spends almost all its
+time on one `dist-tags` request per unique package name, and a warm run answers those
+from disk. The advisory side costs one POST either way.
+
+`--wanted` triples the cold time because it adds one full packument per package whose
+latest release sits outside the declared range — 264 documents here, against 79 bytes
+for a dist-tag. That run leaves about 57 MB in the cache.
 
 ### Where the time goes
 
