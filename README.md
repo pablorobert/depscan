@@ -293,6 +293,26 @@ phase 2  1 bulk advisory POST + N dist-tags requests  batched by unique package
 phase 3  join the answers back onto the projects      local
 ```
 
+### Real-world run
+
+Measured on a development directory holding a mixed set of projects, against the live
+registry, on Windows:
+
+```text
+83 projects          39 bun · 8 npm · 8 pnpm · 8 yarn · 20 without a lockfile
+400 unique direct dependency names to resolve
+551 unique name@version pairs to audit
+
+cold cache           11 s
+warm cache           1.5 s
+```
+
+The gap between the two is the whole design: a cold run spends almost all its time on
+one `dist-tags` request per unique package name, and a warm run answers those from
+disk. The advisory side costs one POST either way.
+
+### Where the time goes
+
 Measured against the live registry for a set of ~1700 unique packages:
 
 | Step | Cost |
@@ -302,8 +322,8 @@ Measured against the live registry for a set of ~1700 unique packages:
 | `latest` via dist-tags, 79 bytes each | ~100–167 packages/s |
 | `wanted` via packument, ~54 KB each | ~8 packages/s (hence opt-in) |
 
-For roughly 100 projects: about 11–17 s cold without `--wanted`, under a second with a
-warm cache. `--wanted` adds roughly 48 s on that set, which is why it is a flag.
+`--wanted` would add roughly 48 s on a set that size, which is why it is a flag and not
+the default.
 
 ## Limitations
 
@@ -318,6 +338,10 @@ warm cache. `--wanted` adds roughly 48 s on that set, which is why it is a flag.
   are only reachable through one.
 - A project with no lockfile reports an error: without one, no installed version can be
   known, and depscan will not guess from a declared range.
+- An npm alias — `"typescript": "npm:some-other-package@1.2.3"`, or the same thing via
+  `overrides` — is resolved under the real package name. That is what security needs,
+  since the advisory belongs to the package actually installed, but the outdated side
+  then reports the aliased name as declared-but-absent instead of following the alias.
 
 ## Development
 
