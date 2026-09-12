@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pablorobert/depscan/internal/model"
@@ -214,6 +215,21 @@ func TestParsePNPMv6KeyShapes(t *testing.T) {
 	}
 	if !findVersion(res.Deps, "follow-redirects", "1.15.6") {
 		t.Error(`legacy "/name/version" key shape not handled`)
+	}
+
+	// Regression: a peer annotation carries '@' of its own, so splitting the key
+	// before stripping it lands inside the parentheses and drops the package. Found
+	// against a real pnpm 6.0 lockfile, where it silently lost 11 direct dependencies.
+	if !findVersion(res.Deps, "next", "14.1.2") {
+		t.Errorf(`peer annotation broke the split for "next": %+v`, res.Deps)
+	}
+	if !findVersion(res.Deps, "@mui/material", "5.15.0") {
+		t.Errorf(`peer annotation broke the split for a scoped name: %+v`, res.Deps)
+	}
+	for _, d := range res.Deps {
+		if strings.ContainsAny(d.Name, "()") || strings.ContainsAny(d.Version, "()") {
+			t.Errorf("peer annotation leaked into the parsed entry: %+v", d)
+		}
 	}
 }
 

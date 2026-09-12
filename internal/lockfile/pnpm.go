@@ -48,8 +48,10 @@ func parsePNPM(path string) ([]resolvedEntry, error) {
 
 	entries := make([]resolvedEntry, 0, len(keys))
 	for _, key := range keys {
-		name, version := pnpmSplitKey(key)
-		version = stripPeerSuffix(version)
+		// The peer annotation must go before the split, not after: it contains '@'
+		// itself, so "/next@14.1.2(react@18.0.0)" would otherwise split on the '@'
+		// inside the parentheses and lose the package entirely.
+		name, version := pnpmSplitKey(stripPeerSuffix(key))
 		if name == "" || !isConcreteVersion(version) {
 			continue
 		}

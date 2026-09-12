@@ -21,3 +21,13 @@ packages:
   /follow-redirects/1.15.6:
     resolution: {integrity: sha512-fixturefollow==}
     dev: false
+
+  # A peer annotation contains '@' of its own, so the suffix has to be stripped
+  # before the name/version split or the whole entry is lost.
+  /next@14.1.2(react-dom@18.0.0)(react@18.0.0):
+    resolution: {integrity: sha512-fixturenext==}
+    dev: false
+
+  /@mui/material@5.15.0(@emotion/react@11.11.0)(react@18.0.0):
+    resolution: {integrity: sha512-fixturemui==}
+    dev: false
