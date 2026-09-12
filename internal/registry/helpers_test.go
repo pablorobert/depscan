@@ -20,18 +20,27 @@ func testCache(t *testing.T) *cache.Cache {
 	return c
 }
 
-// writeStale rewrites an entry with a store time past the TTL, so the next read has to
+// ageEntry pushes an existing entry's store time past the TTL, so the next read has to
 // revalidate instead of serving from the TTL window.
-func writeStale(c *cache.Cache, key string, data []byte, etag string) error {
-	entry := cache.Entry{
-		Key:      key,
-		StoredAt: time.Now().Add(-2 * cache.TTL),
-		ETag:     etag,
-		Data:     data,
+//
+// It patches the file the cache itself wrote rather than composing one, so the payload
+// keeps whatever on-disk encoding the cache uses.
+func ageEntry(c *cache.Cache, key string) error {
+	path := c.Path(cache.BucketRegistry, key)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
 	}
+
+	var entry cache.Entry
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		return err
+	}
+	entry.StoredAt = time.Now().Add(-2 * cache.TTL)
+
 	encoded, err := json.Marshal(entry)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(c.Path(cache.BucketRegistry, key), encoded, 0o644)
+	return os.WriteFile(path, encoded, 0o644)
 }

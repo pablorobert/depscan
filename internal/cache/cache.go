@@ -6,11 +6,16 @@
 package cache
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -29,7 +34,9 @@ type Entry struct {
 	Key      string    `json:"key"`
 	StoredAt time.Time `json:"storedAt"`
 	ETag     string    `json:"etag"`
-	Data     []byte    `json:"data"`
+	// Data is gzipped on disk and inflated by Get, so callers always see the plain
+	// payload. Packuments compress about five to eight times.
+	Data []byte `json:"data"`
 }
 
 // Fresh reports whether the entry is within the TTL.
@@ -112,7 +119,179 @@ func (c *Cache) Get(bucket, key string) (*Entry, bool) {
 		_ = os.Remove(p)
 		return nil, false
 	}
+
+	data, err := decompress(e.Data)
+	if err != nil {
+		// A payload that will not inflate is unusable. This also covers an entry left
+		// by a depscan that stored payloads uncompressed: it is dropped and refetched.
+		_ = os.Remove(p)
+		return nil, false
+	}
+	e.Data = data
 	return &e, true
+}
+
+// DefaultDir returns the canonical cache location without creating it, so the
+// inspection and removal commands work even when caching is switched off for the run.
+func DefaultDir() (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "depscan"), nil
+}
+
+// BucketStats summarizes one bucket.
+type BucketStats struct {
+	Name    string
+	Entries int
+	Bytes   int64
+}
+
+// LargestEntry is one of the heaviest entries, named by the key it was stored under so
+// a reader sees the package rather than a hash.
+type LargestEntry struct {
+	Key   string
+	Bytes int64
+}
+
+// Stats describes what the cache currently holds.
+type Stats struct {
+	Dir        string
+	Exists     bool
+	Entries    int
+	Bytes      int64
+	Buckets    []BucketStats
+	Largest    []LargestEntry
+	Unreadable int
+}
+
+// Inspect walks the cache and reports its size, per bucket, plus the heaviest entries.
+//
+// Only the largest few entries are opened: sizes come from the directory walk, and the
+// key is read afterwards just for the ones that will actually be shown.
+func Inspect(dir string, topN int) (*Stats, error) {
+	st := &Stats{Dir: dir}
+
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return st, nil
+	}
+	st.Exists = true
+
+	type sized struct {
+		path  string
+		bytes int64
+	}
+	var all []sized
+	perBucket := map[string]*BucketStats{}
+
+	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			st.Unreadable++
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		fi, statErr := d.Info()
+		if statErr != nil {
+			st.Unreadable++
+			return nil
+		}
+		size := fi.Size()
+		st.Entries++
+		st.Bytes += size
+
+		bucket := "other"
+		if rel, relErr := filepath.Rel(dir, path); relErr == nil {
+			bucket = filepath.ToSlash(filepath.Dir(rel))
+		}
+		b, ok := perBucket[bucket]
+		if !ok {
+			b = &BucketStats{Name: bucket}
+			perBucket[bucket] = b
+		}
+		b.Entries++
+		b.Bytes += size
+
+		all = append(all, sized{path: path, bytes: size})
+		return nil
+	})
+	if err != nil {
+		return st, err
+	}
+
+	for _, b := range perBucket {
+		st.Buckets = append(st.Buckets, *b)
+	}
+	sort.Slice(st.Buckets, func(i, j int) bool { return st.Buckets[i].Bytes > st.Buckets[j].Bytes })
+
+	sort.Slice(all, func(i, j int) bool { return all[i].bytes > all[j].bytes })
+	if topN > len(all) {
+		topN = len(all)
+	}
+	for _, s := range all[:topN] {
+		st.Largest = append(st.Largest, LargestEntry{Key: keyOf(s.path), Bytes: s.bytes})
+	}
+	return st, nil
+}
+
+// keyOf reads just the key out of an entry file, falling back to the filename when the
+// entry cannot be read.
+func keyOf(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return filepath.Base(path)
+	}
+	var e struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(raw, &e); err != nil || e.Key == "" {
+		return filepath.Base(path)
+	}
+	return e.Key
+}
+
+// Clean removes the cache directory and reports what it freed. Removing the cache is
+// always safe: every entry is a copy of something the registry can serve again.
+func Clean(dir string) (freedBytes int64, freedEntries int, err error) {
+	st, err := Inspect(dir, 0)
+	if err != nil {
+		return 0, 0, err
+	}
+	if !st.Exists {
+		return 0, 0, nil
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return 0, 0, err
+	}
+	return st.Bytes, st.Entries, nil
+}
+
+func compress(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := zw.Write(data); err != nil {
+		zw.Close()
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func decompress(data []byte) ([]byte, error) {
+	zr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	defer zr.Close()
+	return io.ReadAll(zr)
 }
 
 // Put stores data under key. The write goes to a temporary file in the same directory
@@ -122,7 +301,14 @@ func (c *Cache) Put(bucket, key string, data []byte, etag string) error {
 	if !c.enabled {
 		return nil
 	}
-	e := Entry{Key: key, StoredAt: time.Now(), ETag: etag, Data: data}
+	// Compressing before the envelope matters twice over: the payload itself shrinks
+	// five to eight times, and the base64 the JSON envelope applies then runs over the
+	// smaller bytes instead of inflating the raw document by a third.
+	packed, err := compress(data)
+	if err != nil {
+		return err
+	}
+	e := Entry{Key: key, StoredAt: time.Now(), ETag: etag, Data: packed}
 	encoded, err := json.Marshal(e)
 	if err != nil {
 		return err

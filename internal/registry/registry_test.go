@@ -253,11 +253,10 @@ func TestPackumentRevalidatesWithETag(t *testing.T) {
 
 	// Force the cached entry to look stale so the next call revalidates instead of
 	// serving straight from the TTL.
-	entry, ok := c.Get(cache.BucketRegistry, "packument:axios")
-	if !ok {
+	if _, ok := c.Get(cache.BucketRegistry, "packument:axios"); !ok {
 		t.Fatal("packument was not cached")
 	}
-	if err := writeStale(c, "packument:axios", entry.Data, entry.ETag); err != nil {
+	if err := ageEntry(c, "packument:axios"); err != nil {
 		t.Fatal(err)
 	}
 

@@ -83,10 +83,38 @@ func TestParseIgnoreIsRepeatableAndCommaSeparated(t *testing.T) {
 	}
 }
 
-func TestParseHelpAndVersionNeedNoDirectory(t *testing.T) {
-	for _, flag := range []string{"--help", "--version"} {
+func TestParseSelfActingFlagsNeedNoDirectory(t *testing.T) {
+	for _, flag := range []string{"--help", "--version", "--list-cache", "--clean-cache"} {
 		if _, err := Parse([]string{flag}, io.Discard); err != nil {
 			t.Errorf("%s: %v", flag, err)
+		}
+	}
+}
+
+func TestParseCacheFlagsRejectADirectory(t *testing.T) {
+	for _, flag := range []string{"--list-cache", "--clean-cache"} {
+		if _, err := Parse([]string{flag, "/projects"}, io.Discard); err == nil {
+			t.Errorf("%s with a directory should be rejected", flag)
+		}
+	}
+	if _, err := Parse([]string{"--list-cache", "--clean-cache"}, io.Discard); err == nil {
+		t.Error("--list-cache and --clean-cache together should be rejected")
+	}
+}
+
+func TestHumanBytes(t *testing.T) {
+	cases := map[int64]string{
+		0:             "0 B",
+		512:           "512 B",
+		1024:          "1.0 KB",
+		1536:          "1.5 KB",
+		1024 * 1024:   "1.0 MB",
+		235 * 1 << 20: "235.0 MB",
+		3 * 1 << 30:   "3.0 GB",
+	}
+	for n, want := range cases {
+		if got := humanBytes(n); got != want {
+			t.Errorf("humanBytes(%d) = %q, want %q", n, got, want)
 		}
 	}
 }

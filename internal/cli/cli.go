@@ -39,6 +39,8 @@ type Config struct {
 
 	Offline     bool
 	NoCache     bool
+	ListCache   bool
+	CleanCache  bool
 	Concurrency int
 	Timeout     time.Duration
 
@@ -92,6 +94,15 @@ NETWORK
   --no-cache             ignore the on-disk cache for this run
   --concurrency <n>      concurrent registry requests (default 64, max 256)
   --timeout <duration>   per-request timeout (default 15s)
+
+CACHE
+  --list-cache           show where the cache lives, what it holds and which
+                         entries are the heaviest, then exit
+  --clean-cache          delete the cache and report what was freed, then exit
+
+  Both take no directory. The cache is only ever a copy of something the
+  registry can serve again, so deleting it is always safe; the next run just
+  pays the cold price again.
 
 EXIT
   --fail-on <severity>   minimum severity that causes exit 1
@@ -172,6 +183,8 @@ func Parse(args []string, stderr io.Writer) (*Config, error) {
 	fs.BoolVar(&cfg.Wanted, "wanted", false, "compute the highest in-range version")
 	fs.BoolVar(&cfg.Offline, "offline", false, "make no network requests")
 	fs.BoolVar(&cfg.NoCache, "no-cache", false, "ignore the on-disk cache")
+	fs.BoolVar(&cfg.ListCache, "list-cache", false, "show what the cache holds and exit")
+	fs.BoolVar(&cfg.CleanCache, "clean-cache", false, "delete the cache and exit")
 	fs.IntVar(&cfg.Concurrency, "concurrency", 64, "concurrent registry requests")
 	fs.DurationVar(&cfg.Timeout, "timeout", 15*time.Second, "per-request timeout")
 	fs.StringVar(&failOn, "fail-on", "", "minimum severity for exit 1")
@@ -183,7 +196,15 @@ func Parse(args []string, stderr io.Writer) (*Config, error) {
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
-	if cfg.ShowHelp || cfg.ShowVersion {
+	// These act on depscan itself rather than on a directory, so they take no
+	// positional argument.
+	if cfg.ShowHelp || cfg.ShowVersion || cfg.ListCache || cfg.CleanCache {
+		if cfg.ListCache && cfg.CleanCache {
+			return nil, fmt.Errorf("--list-cache and --clean-cache are mutually exclusive")
+		}
+		if len(fs.Args()) > 0 {
+			return nil, fmt.Errorf("this option takes no directory, got %q", fs.Args()[0])
+		}
 		return cfg, nil
 	}
 

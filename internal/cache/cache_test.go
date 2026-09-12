@@ -1,7 +1,9 @@
 package cache
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -184,13 +186,173 @@ func TestConcurrentPutsDoNotCorrupt(t *testing.T) {
 	}
 }
 
+// writeEntry writes an entry the way Put would, compressing the payload first.
 func writeEntry(t *testing.T, path string, e Entry) {
 	t.Helper()
+	packed, err := compress(e.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Data = packed
 	data, err := json.Marshal(e)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPayloadIsStoredCompressed(t *testing.T) {
+	dir := t.TempDir()
+	c := newAt(t, dir)
+
+	// A packument-shaped payload: highly repetitive, which is why compression pays.
+	var sb strings.Builder
+	sb.WriteString(`{"versions":{`)
+	for i := range 2000 {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, `"1.0.%d":{"dist":{"tarball":"https://registry.npmjs.org/p/-/p-1.0.%d.tgz"}}`, i, i)
+	}
+	sb.WriteString("}}")
+	payload := []byte(sb.String())
+
+	key := "packument:big"
+	if err := c.Put(BucketRegistry, key, payload, `"v1"`); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	onDisk, err := os.Stat(c.path(BucketRegistry, key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.Size() >= int64(len(payload)) {
+		t.Fatalf("stored %d bytes for a %d byte payload; it is not being compressed",
+			onDisk.Size(), len(payload))
+	}
+
+	// Get must hand back the original bytes, inflated.
+	e, ok := c.Get(BucketRegistry, key)
+	if !ok {
+		t.Fatal("entry not found")
+	}
+	if !bytes.Equal(e.Data, payload) {
+		t.Fatal("the payload did not survive the compression round trip")
+	}
+	if e.ETag != `"v1"` {
+		t.Errorf("etag = %q", e.ETag)
+	}
+}
+
+func TestUncompressedEntryIsDroppedAndRefetched(t *testing.T) {
+	dir := t.TempDir()
+	c := newAt(t, dir)
+	key := "packument:legacy"
+
+	// An entry as an older depscan wrote it: valid envelope, raw payload.
+	raw, err := json.Marshal(Entry{Key: key, StoredAt: time.Now(), Data: []byte(`{"versions":{}}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := c.path(BucketRegistry, key)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := c.Get(BucketRegistry, key); ok {
+		t.Fatal("a payload that will not inflate must be reported as a miss")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("the unusable entry must be removed so the next run refetches it")
+	}
+}
+
+func TestInspectReportsSizeBucketsAndHeaviestEntries(t *testing.T) {
+	dir := t.TempDir()
+	c := newAt(t, dir)
+
+	if err := c.Put(BucketRegistry, "dist-tags:small", []byte(`{"latest":"1.0.0"}`), ""); err != nil {
+		t.Fatal(err)
+	}
+	big := bytes.Repeat([]byte("packument payload "), 4000)
+	if err := c.Put(BucketRegistry, "packument:heavy", big, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Put(BucketAdvisories, "bulk:abc", []byte(`{}`), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Inspect(dir, 5)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if !st.Exists {
+		t.Fatal("cache should exist")
+	}
+	if st.Entries != 3 {
+		t.Fatalf("entries = %d, want 3", st.Entries)
+	}
+	if st.Bytes <= 0 {
+		t.Fatal("byte total should be positive")
+	}
+
+	byName := map[string]BucketStats{}
+	for _, b := range st.Buckets {
+		byName[b.Name] = b
+	}
+	if byName[BucketRegistry].Entries != 2 {
+		t.Errorf("registry bucket = %+v, want 2 entries", byName[BucketRegistry])
+	}
+	if byName[BucketAdvisories].Entries != 1 {
+		t.Errorf("advisories bucket = %+v, want 1 entry", byName[BucketAdvisories])
+	}
+
+	if len(st.Largest) == 0 {
+		t.Fatal("no heaviest entries reported")
+	}
+	// The heaviest entry is named by its key, not by the hashed filename.
+	if st.Largest[0].Key != "packument:heavy" {
+		t.Fatalf("heaviest entry = %q, want packument:heavy", st.Largest[0].Key)
+	}
+}
+
+func TestInspectOnMissingDirectory(t *testing.T) {
+	st, err := Inspect(filepath.Join(t.TempDir(), "never-created"), 5)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if st.Exists || st.Entries != 0 {
+		t.Fatalf("stats = %+v, want an empty report", st)
+	}
+}
+
+func TestCleanRemovesEverythingAndReportsIt(t *testing.T) {
+	dir := t.TempDir()
+	c := newAt(t, dir)
+	if err := c.Put(BucketRegistry, "dist-tags:axios", []byte(`{"latest":"1.0.0"}`), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	freed, entries, err := Clean(dir)
+	if err != nil {
+		t.Fatalf("Clean: %v", err)
+	}
+	if entries != 1 || freed <= 0 {
+		t.Fatalf("freed %d bytes in %d entries, want one non-empty entry", freed, entries)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal("the cache directory should be gone")
+	}
+}
+
+func TestCleanOnMissingDirectoryIsNotAnError(t *testing.T) {
+	freed, entries, err := Clean(filepath.Join(t.TempDir(), "never-created"))
+	if err != nil {
+		t.Fatalf("Clean: %v", err)
+	}
+	if freed != 0 || entries != 0 {
+		t.Fatalf("freed %d bytes in %d entries, want zero", freed, entries)
 	}
 }
