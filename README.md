@@ -81,7 +81,7 @@ nothing on its own — read the status.
 ## Installation
 
 ```bash
-go install depscan@latest
+go install github.com/pablorobert/depscan@latest
 ```
 
 Or build from a checkout:
@@ -91,6 +91,8 @@ go build -o depscan .
 ```
 
 A single native binary, no runtime dependency on Node.js. Linux, macOS and Windows.
+Building needs nothing beyond the Go toolchain; a C compiler is only required to run
+the test suite under `-race`.
 
 ## Usage
 
