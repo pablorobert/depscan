@@ -1,0 +1,7 @@
+# Compiled binary
+/depscan
+/depscan.exe
+
+# Go build and test artifacts
+*.test
+*.out
