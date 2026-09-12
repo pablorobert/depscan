@@ -103,8 +103,8 @@ depscan --wanted <directory>        # also compute the highest in-range version
 depscan --only-vulnerable ~/code    # skip the outdated check
 depscan --fail-on high ~/code       # exit 1 only at high or critical
 
-depscan --list-cache                # inspect the cache
-depscan --clean-cache               # delete it
+depscan --cache-list                # inspect the cache
+depscan --cache-clean               # delete it
 ```
 
 `depscan --help` documents every flag, the output modes, the exit codes and the
@@ -286,12 +286,12 @@ Payloads are gzipped on disk. Packuments are large and highly repetitive — a f
 `--wanted` run over 83 projects stores 57 MB compressed, against 235 MB raw.
 
 ```bash
-depscan --list-cache    # where it lives, what it holds, which entries are heaviest
-depscan --clean-cache   # delete it and report what was freed
+depscan --cache-list    # where it lives, what it holds, which entries are heaviest
+depscan --cache-clean   # delete it and report what was freed
 ```
 
 ```text
-$ depscan --list-cache
+$ depscan --cache-list
 Cache directory
   /home/user/.cache/depscan
 

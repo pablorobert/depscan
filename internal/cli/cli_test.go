@@ -84,7 +84,7 @@ func TestParseIgnoreIsRepeatableAndCommaSeparated(t *testing.T) {
 }
 
 func TestParseSelfActingFlagsNeedNoDirectory(t *testing.T) {
-	for _, flag := range []string{"--help", "--version", "--list-cache", "--clean-cache"} {
+	for _, flag := range []string{"--help", "--version", "--cache-list", "--cache-clean"} {
 		if _, err := Parse([]string{flag}, io.Discard); err != nil {
 			t.Errorf("%s: %v", flag, err)
 		}
@@ -92,13 +92,13 @@ func TestParseSelfActingFlagsNeedNoDirectory(t *testing.T) {
 }
 
 func TestParseCacheFlagsRejectADirectory(t *testing.T) {
-	for _, flag := range []string{"--list-cache", "--clean-cache"} {
+	for _, flag := range []string{"--cache-list", "--cache-clean"} {
 		if _, err := Parse([]string{flag, "/projects"}, io.Discard); err == nil {
 			t.Errorf("%s with a directory should be rejected", flag)
 		}
 	}
-	if _, err := Parse([]string{"--list-cache", "--clean-cache"}, io.Discard); err == nil {
-		t.Error("--list-cache and --clean-cache together should be rejected")
+	if _, err := Parse([]string{"--cache-list", "--cache-clean"}, io.Discard); err == nil {
+		t.Error("--cache-list and --cache-clean together should be rejected")
 	}
 }
 

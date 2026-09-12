@@ -535,9 +535,9 @@ MVP expõe `--no-cache` para ignorar o cache num run, mais dois comandos que age
 o próprio cache e não recebem diretório:
 
 ```
---list-cache    diretório, contagem por bucket, tamanho total e as entradas mais
+--cache-list    diretório, contagem por bucket, tamanho total e as entradas mais
                 pesadas, nomeadas pela chave e não pelo hash do arquivo
---clean-cache   apaga e reporta o que foi liberado
+--cache-clean   apaga e reporta o que foi liberado
 ```
 
 Apagar é sempre seguro: toda entrada é cópia de algo que o registry serve de novo.

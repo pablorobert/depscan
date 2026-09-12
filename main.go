@@ -29,9 +29,9 @@ func main() {
 	case cfg.ShowVersion:
 		fmt.Fprintf(os.Stdout, "depscan %s\n", cli.Version)
 		os.Exit(cli.ExitOK)
-	case cfg.ListCache:
+	case cfg.CacheList:
 		os.Exit(cli.ListCache(os.Stdout, os.Stderr))
-	case cfg.CleanCache:
+	case cfg.CacheClean:
 		os.Exit(cli.CleanCache(os.Stdout, os.Stderr))
 	}
 

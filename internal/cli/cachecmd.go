@@ -7,7 +7,7 @@ import (
 	"github.com/pablorobert/depscan/internal/cache"
 )
 
-// topCacheEntries is how many of the heaviest entries --list-cache names. A handful is
+// topCacheEntries is how many of the heaviest entries --cache-list names. A handful is
 // enough to explain where the space went, which is the only reason to ask.
 const topCacheEntries = 10
 
@@ -52,7 +52,7 @@ func ListCache(stdout, stderr io.Writer) int {
 		}
 	}
 
-	fmt.Fprintf(stdout, "\nEntries expire after %s. Run 'depscan --clean-cache' to remove them now.\n", cache.TTL)
+	fmt.Fprintf(stdout, "\nEntries expire after %s. Run 'depscan --cache-clean' to remove them now.\n", cache.TTL)
 	return ExitOK
 }
 
