@@ -158,8 +158,17 @@ func (t *Terminal) projectBody(p *model.Project) {
 	case model.StatusFindings:
 		wrote = true
 		fmt.Fprintf(t.w, "    %d outdated\n", len(p.Outdated.Packages))
+		heldBack := false
 		for _, o := range p.Outdated.Packages {
 			t.outdatedLine(o)
+			if o.ReleaseAge != nil && o.ReleaseAge.Status == model.ReleaseAgeHeldBack {
+				heldBack = true
+			}
+		}
+		if heldBack {
+			fmt.Fprintf(t.w, "      %s\n", s.paint(colDim, fmt.Sprintf(
+				"* published less than %s ago; %s skips it (minimumReleaseAge in %s)",
+				humanSeconds(p.MinimumReleaseAge.Seconds), p.PackageManager, p.MinimumReleaseAge.Source)))
 		}
 	case model.StatusClean:
 		wrote = true
@@ -221,8 +230,41 @@ func (t *Terminal) outdatedLine(o model.OutdatedPackage) {
 		note = "  (wanted not computed — use --wanted)"
 	}
 
+	if ra := o.ReleaseAge; ra != nil {
+		switch ra.Status {
+		case model.ReleaseAgeHeldBack:
+			// Mirrors bun outdated: the star says latest is too recent to install.
+			target += "*"
+			switch {
+			case ra.Eligible == nil:
+				note = "  (no release old enough yet)"
+			case *ra.Eligible == o.Current:
+				note = "  (nothing installable yet)"
+			case o.Wanted != nil && *o.Wanted != *ra.Eligible:
+				note = fmt.Sprintf("  (installable: %s in range, %s latest)", *o.Wanted, *ra.Eligible)
+			default:
+				note = fmt.Sprintf("  (installable: %s)", *ra.Eligible)
+			}
+		case model.ReleaseAgeNotChecked:
+			note += "  (release age not checked)"
+		}
+	}
+
 	fmt.Fprintf(t.w, "      %-24s %s %s %-8s %s%s\n",
 		o.Name, o.Current, t.style.glyph("→", "->"), target, kind, note)
+}
+
+// humanSeconds renders a release-age window the way people configure it: 259200 is
+// "72h", not "259200s".
+func humanSeconds(s int64) string {
+	switch {
+	case s%3600 == 0:
+		return fmt.Sprintf("%dh", s/3600)
+	case s%60 == 0:
+		return fmt.Sprintf("%dmin", s/60)
+	default:
+		return fmt.Sprintf("%ds", s)
+	}
 }
 
 // securityBlock renders vulnerabilities grouped by direct and transitive. Direct

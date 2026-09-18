@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pablorobert/depscan/internal/model"
 )
@@ -23,6 +24,9 @@ import (
 // verified on the complete code path rather than only in offline mode.
 func fakeNPM(t *testing.T) *httptest.Server {
 	t.Helper()
+	// 9.9.9 was published just now, so a minimum release age holds it back and 1.7.0
+	// is the newest installable version.
+	recent := time.Now().UTC().Format(time.RFC3339)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/security/advisories/bulk"):
@@ -43,11 +47,70 @@ func fakeNPM(t *testing.T) *httptest.Server {
 			fmt.Fprint(w, `{"latest":"9.9.9"}`)
 
 		default:
-			fmt.Fprint(w, `{"versions":{"1.6.0":{},"1.7.0":{},"9.9.9":{}}}`)
+			fmt.Fprintf(w, `{"versions":{"1.6.0":{},"1.7.0":{},"9.9.9":{}},`+
+				`"time":{"1.6.0":"2020-01-01T00:00:00Z","1.7.0":"2020-06-01T00:00:00Z","9.9.9":%q}}`, recent)
 		}
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// TestBunMinimumReleaseAgeMarksHeldBackLatest scans a bun project whose bunfig.toml
+// sets a window: latest is marked the way bun outdated marks it, and the version bun
+// would actually install is named.
+func TestBunMinimumReleaseAgeMarksHeldBackLatest(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	srv := fakeNPM(t)
+
+	root := t.TempDir()
+	copyTree(t, filepath.Join("..", "..", "testdata", "fixtures", "bun-text"), root)
+	if err := os.WriteFile(filepath.Join(root, "bunfig.toml"),
+		[]byte("[install]\nminimumReleaseAge = 259200\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) string {
+		cfg, err := Parse(append(args, "--no-cache", root), io.Discard)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		cfg.RegistryBaseURL = srv.URL
+		cfg.AdvisoryBaseURL = srv.URL
+		var stdout, stderr bytes.Buffer
+		Run(cfg, &stdout, &stderr)
+		return stdout.String()
+	}
+
+	var rep model.Report
+	if err := json.Unmarshal([]byte(run("--json")), &rep); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	p := rep.Projects[0]
+	if p.MinimumReleaseAge == nil || p.MinimumReleaseAge.Seconds != 259200 {
+		t.Fatalf("minimumReleaseAge = %+v, want 259200 from the project bunfig", p.MinimumReleaseAge)
+	}
+	var axios *model.OutdatedPackage
+	for i := range p.Outdated.Packages {
+		if p.Outdated.Packages[i].Name == "axios" {
+			axios = &p.Outdated.Packages[i]
+		}
+	}
+	if axios == nil || axios.ReleaseAge == nil {
+		t.Fatalf("axios release age missing: %+v", axios)
+	}
+	if axios.ReleaseAge.Status != model.ReleaseAgeHeldBack {
+		t.Fatalf("status = %q, want held-back", axios.ReleaseAge.Status)
+	}
+	if axios.ReleaseAge.Eligible == nil || *axios.ReleaseAge.Eligible != "1.7.0" {
+		t.Fatalf("eligible = %v, want 1.7.0", axios.ReleaseAge.Eligible)
+	}
+
+	text := run()
+	for _, want := range []string{"9.9.9*", "installable: 1.7.0", "published less than 72h ago"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("terminal output is missing %q\n---\n%s", want, text)
+		}
+	}
 }
 
 // hashTree fingerprints every file under root: relative path, size and content.

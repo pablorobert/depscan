@@ -22,8 +22,11 @@ type fakeRegistry struct {
 	latest     map[string]string
 	versions   map[string][]string
 	advisories map[string]string // package -> raw JSON array
+	// published serves the full packument: package -> version -> RFC 3339 time.
+	published  map[string]map[string]string
 	distTagHit atomic.Int32
 	packumHit  atomic.Int32
+	fullHit    atomic.Int32
 	bulkHit    atomic.Int32
 	bulkStatus int
 }
@@ -58,6 +61,23 @@ func (f *fakeRegistry) handler() http.Handler {
 				return
 			}
 			fmt.Fprintf(w, `{"latest":%q}`, v)
+
+		case r.Header.Get("Accept") == "application/json":
+			f.fullHit.Add(1)
+			name := strings.ReplaceAll(strings.TrimPrefix(r.URL.EscapedPath(), "/"), "%2F", "/")
+			times, ok := f.published[name]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			versions := make([]string, 0, len(times))
+			stamps := make([]string, 0, len(times))
+			for v, ts := range times {
+				versions = append(versions, fmt.Sprintf("%q:{}", v))
+				stamps = append(stamps, fmt.Sprintf("%q:%q", v, ts))
+			}
+			fmt.Fprintf(w, `{"versions":{%s},"time":{"created":"2020-01-01T00:00:00Z",%s}}`,
+				strings.Join(versions, ","), strings.Join(stamps, ","))
 
 		default:
 			f.packumHit.Add(1)
@@ -178,6 +198,130 @@ func TestWantedFlagFetchesPackumentAndComputesInRangeMaximum(t *testing.T) {
 	}
 	if got := f.packumHit.Load(); got != 1 {
 		t.Fatalf("packument requests = %d, want exactly 1", got)
+	}
+}
+
+// releaseAgeNow is the reference clock for the minimum release age tests; with a 72h
+// window, anything published after 2026-09-15T12:00Z is held back.
+var releaseAgeNow = time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+
+func withWindow(p *model.Project, excludes ...string) *model.Project {
+	p.MinimumReleaseAge = &model.MinimumReleaseAge{Seconds: 259200, Excludes: excludes, Source: "bunfig.toml"}
+	return p
+}
+
+func TestReleaseAgeHoldsBackRecentLatest(t *testing.T) {
+	// Shape of @babel/core in a real scan: 8.0.6 is two days old, 8.0.5 is not.
+	f := &fakeRegistry{
+		latest: map[string]string{"@babel/core": "8.0.6"},
+		published: map[string]map[string]string{"@babel/core": {
+			"7.29.7":       "2026-06-01T00:00:00Z",
+			"7.29.8":       "2026-09-17T00:00:00Z",
+			"8.0.5":        "2026-09-10T00:00:00Z",
+			"8.1.0-beta.1": "2026-09-11T00:00:00Z",
+			"8.0.6":        "2026-09-16T12:00:00Z",
+		}},
+	}
+	p := withWindow(projectWith("app", directDep("@babel/core", "^7.29.0", "7.29.7")))
+
+	Run(context.Background(), []*model.Project{p}, f.clients(t), Options{Now: releaseAgeNow})
+
+	o, ok := outdatedFor(p, "@babel/core")
+	if !ok || o.ReleaseAge == nil {
+		t.Fatalf("release age missing: %+v", o)
+	}
+	if o.ReleaseAge.Status != model.ReleaseAgeHeldBack {
+		t.Fatalf("status = %q, want held-back", o.ReleaseAge.Status)
+	}
+	if o.ReleaseAge.Eligible == nil || *o.ReleaseAge.Eligible != "8.0.5" {
+		t.Fatalf("eligible = %v, want 8.0.5 (the prerelease and the too-recent 8.0.6 skipped)", o.ReleaseAge.Eligible)
+	}
+	if o.ReleaseAge.LatestPublishedAt == nil || *o.ReleaseAge.LatestPublishedAt != "2026-09-16T12:00:00Z" {
+		t.Fatalf("latestPublishedAt = %v", o.ReleaseAge.LatestPublishedAt)
+	}
+	if o.Latest != "8.0.6" {
+		t.Fatalf("latest = %q: the registry's latest is still reported as is", o.Latest)
+	}
+	// 7.29.8 is in range but too recent, so bun update would stay on 7.29.7.
+	if o.Wanted == nil || *o.Wanted != "7.29.7" || o.WantedSource != model.WantedRegistry {
+		t.Fatalf("wanted = %v (%s), want 7.29.7 from the registry", o.Wanted, o.WantedSource)
+	}
+	if o.UpdateType != model.UpdateNone {
+		t.Fatalf("updateType = %q, want none", o.UpdateType)
+	}
+}
+
+func TestReleaseAgePassedComputesWantedForFree(t *testing.T) {
+	f := &fakeRegistry{
+		latest: map[string]string{"react": "19.2.0"},
+		published: map[string]map[string]string{"react": {
+			"18.2.0": "2024-01-01T00:00:00Z",
+			"18.3.1": "2024-04-26T00:00:00Z",
+			"19.2.0": "2026-01-01T00:00:00Z",
+		}},
+	}
+	p := withWindow(projectWith("app", directDep("react", "^18.0.0", "18.2.0")))
+
+	Run(context.Background(), []*model.Project{p}, f.clients(t), Options{Now: releaseAgeNow})
+
+	o, _ := outdatedFor(p, "react")
+	if o.ReleaseAge == nil || o.ReleaseAge.Status != model.ReleaseAgePassed {
+		t.Fatalf("release age = %+v, want passed", o.ReleaseAge)
+	}
+	if o.ReleaseAge.Eligible == nil || *o.ReleaseAge.Eligible != "19.2.0" {
+		t.Fatalf("eligible = %v, want latest", o.ReleaseAge.Eligible)
+	}
+	// The full version list was fetched anyway, so wanted needs no --wanted.
+	if o.Wanted == nil || *o.Wanted != "18.3.1" || o.WantedSource != model.WantedRegistry {
+		t.Fatalf("wanted = %v (%s), want 18.3.1 from the registry", o.Wanted, o.WantedSource)
+	}
+	if got := f.packumHit.Load(); got != 0 {
+		t.Fatalf("abbreviated packument requests = %d, want 0", got)
+	}
+}
+
+func TestReleaseAgeExcludedPackageIsNotFetched(t *testing.T) {
+	f := &fakeRegistry{latest: map[string]string{"axios": "1.20.0"}}
+	p := withWindow(projectWith("app", directDep("axios", "^1.6.0", "1.6.0")), "axios")
+
+	Run(context.Background(), []*model.Project{p}, f.clients(t), Options{Now: releaseAgeNow})
+
+	o, _ := outdatedFor(p, "axios")
+	if o.ReleaseAge == nil || o.ReleaseAge.Status != model.ReleaseAgeExcluded {
+		t.Fatalf("release age = %+v, want excluded", o.ReleaseAge)
+	}
+	if got := f.fullHit.Load(); got != 0 {
+		t.Fatalf("full packument requests = %d, want 0 for an excluded package", got)
+	}
+}
+
+func TestReleaseAgeFetchFailureIsNotCheckedAndReported(t *testing.T) {
+	f := &fakeRegistry{latest: map[string]string{"axios": "1.20.0"}}
+	p := withWindow(projectWith("app", directDep("axios", "^1.6.0", "1.6.0")))
+
+	Run(context.Background(), []*model.Project{p}, f.clients(t), Options{Now: releaseAgeNow})
+
+	o, _ := outdatedFor(p, "axios")
+	if o.ReleaseAge == nil || o.ReleaseAge.Status != model.ReleaseAgeNotChecked {
+		t.Fatalf("release age = %+v, want not-checked", o.ReleaseAge)
+	}
+	if len(p.Errors) == 0 {
+		t.Fatal("the failed lookup must be recorded on the project")
+	}
+}
+
+func TestNoWindowMeansNoFullPackument(t *testing.T) {
+	f := &fakeRegistry{latest: map[string]string{"axios": "1.20.0"}}
+	p := projectWith("app", directDep("axios", "^1.6.0", "1.6.0"))
+
+	Run(context.Background(), []*model.Project{p}, f.clients(t), Options{Now: releaseAgeNow})
+
+	o, _ := outdatedFor(p, "axios")
+	if o.ReleaseAge != nil {
+		t.Fatalf("release age = %+v, want nil without a window", o.ReleaseAge)
+	}
+	if got := f.fullHit.Load(); got != 0 {
+		t.Fatalf("full packument requests = %d, want 0", got)
 	}
 }
 

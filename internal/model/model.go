@@ -168,6 +168,42 @@ type OutdatedPackage struct {
 	WantedSource     WantedSource `json:"wantedSource"`
 	Direct           bool         `json:"direct"`
 	Category         *Category    `json:"category"`
+	// ReleaseAge is null unless the project's package manager enforces a minimum
+	// release age (bun's minimumReleaseAge). SPEC.md section 9.3.
+	ReleaseAge *ReleaseAgeCheck `json:"releaseAge"`
+}
+
+// ReleaseAgeStatus is the outcome of checking Latest against a minimum release age.
+type ReleaseAgeStatus string
+
+const (
+	// ReleaseAgePassed means Latest is older than the window.
+	ReleaseAgePassed ReleaseAgeStatus = "passed"
+	// ReleaseAgeHeldBack means Latest is inside the window, so the package manager
+	// will not install it yet.
+	ReleaseAgeHeldBack ReleaseAgeStatus = "held-back"
+	// ReleaseAgeExcluded means the package is listed in the window's exclusions.
+	ReleaseAgeExcluded ReleaseAgeStatus = "excluded"
+	// ReleaseAgeNotChecked means publish dates could not be obtained. Latest may or may
+	// not be held back.
+	ReleaseAgeNotChecked ReleaseAgeStatus = "not-checked"
+)
+
+// ReleaseAgeCheck says whether the package manager would actually take Latest today.
+type ReleaseAgeCheck struct {
+	Status            ReleaseAgeStatus `json:"status"`
+	LatestPublishedAt *string          `json:"latestPublishedAt"`
+	// Eligible is the newest version outside the window: Latest when passed, an older
+	// version when held back, null when nothing qualifies or it was not checked.
+	Eligible *string `json:"eligible"`
+}
+
+// MinimumReleaseAge is the window a project's package manager enforces.
+type MinimumReleaseAge struct {
+	Seconds  int64    `json:"seconds"`
+	Excludes []string `json:"excludes"`
+	// Source is the config file the window came from.
+	Source string `json:"source"`
 }
 
 // CVSS is the advisory score as returned by the registry; VectorString is frequently
@@ -215,14 +251,17 @@ type SecurityResult struct {
 
 // Project is one discovered package.json and everything learned about it.
 type Project struct {
-	Path           string         `json:"path"`
-	Name           string         `json:"name"`
-	PackageManager string         `json:"packageManager"`
-	Lockfile       string         `json:"lockfile"`
-	WorkspaceRoot  *string        `json:"workspaceRoot"`
-	Outdated       OutdatedResult `json:"outdated"`
-	Security       SecurityResult `json:"security"`
-	Errors         []ProjectError `json:"errors"`
+	Path           string  `json:"path"`
+	Name           string  `json:"name"`
+	PackageManager string  `json:"packageManager"`
+	Lockfile       string  `json:"lockfile"`
+	WorkspaceRoot  *string `json:"workspaceRoot"`
+	// MinimumReleaseAge is null when the package manager enforces no window, or when
+	// depscan does not read that manager's setting (only bun's is read today).
+	MinimumReleaseAge *MinimumReleaseAge `json:"minimumReleaseAge"`
+	Outdated          OutdatedResult     `json:"outdated"`
+	Security          SecurityResult     `json:"security"`
+	Errors            []ProjectError     `json:"errors"`
 
 	// Deps is the resolved dependency set from the lockfile, used to build the network
 	// batches. Not serialized.

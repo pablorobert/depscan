@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pablorobert/depscan/internal/advisory"
+	"github.com/pablorobert/depscan/internal/bunfig"
 	"github.com/pablorobert/depscan/internal/cache"
 	"github.com/pablorobert/depscan/internal/model"
 	"github.com/pablorobert/depscan/internal/output"
@@ -106,6 +107,7 @@ func loadProjects(dirs []string) []*model.Project {
 	opts := project.LoadOptions{
 		AllowBunSpawn:       bunErr == nil,
 		SpawnTimeoutSeconds: 30,
+		GlobalBunfig:        bunfig.GlobalPath(),
 	}
 
 	out := make([]*model.Project, len(dirs))

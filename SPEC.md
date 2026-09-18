@@ -265,7 +265,45 @@ demonstrável (o range aceita `latest`). Com `wantedSource: "not-computed"`, `wa
 ### 9.3 `minimum-release-age`
 
 Se a configuração do projeto suprimir versões recentes, `latest` do dist-tag pode não
-ser o latest efetivo para aquele projeto. Fora do escopo do MVP; não emitir campo.
+ser o latest efetivo para aquele projeto.
+
+**Implementado só para bun.** npm (`before`), pnpm (`minimumReleaseAge`) e yarn
+(`npmMinimalAgeGate`) ficam para depois: nesses projetos `minimumReleaseAge` é `null` e
+nenhum pacote leva `*`, mesmo com a configuração ligada.
+
+Fonte da janela: `[install] minimumReleaseAge` (segundos) e
+`minimumReleaseAgeExcludes` do `bunfig.toml` do projeto, senão do global
+(`$XDG_CONFIG_HOME/.bunfig.toml` ou `~/.bunfig.toml`). Chave a chave: o projeto pode
+sobrescrever só a janela e herdar os excludes. `0` no projeto desliga a global.
+
+Fonte da data: só o packument **completo** tem `time` — o abreviado tem apenas
+`modified`. Medido em zod: 460 KB completo contra 345 KB abreviado (gzip). Por isso a
+busca é restrita a pacotes **desatualizados** de projetos bun **com janela**, fora dos
+excludes. Sem janela, zero requests extras. O cache guarda só `{versions, time}`.
+
+Regra (conferida contra `bun outdated` 1.4.2 num projeto real, 19 pacotes, os 10 `*`
+coincidindo):
+
+- `latest` publicado antes de `agora − janela` → `passed`, `eligible = latest`
+- senão → `held-back`; `eligible` = maior versão `<= latest`, fora da janela, estável
+  (pré-release só se o próprio `latest` for pré-release); `null` se nenhuma
+- `wanted` passa a ser o maior do range **fora da janela** (coluna Update do bun),
+  `wantedSource: registry` — também quando antes seria `not-computed`, já que a lista
+  completa veio de graça
+- falha ao buscar → `not-checked` + erro no projeto; nunca `passed` por omissão
+
+`latest` continua sendo o dist-tag. O efeito da janela fica ao lado:
+
+```json
+"releaseAge": {
+  "status": "held-back",
+  "latestPublishedAt": "2026-09-18T13:48:10Z",
+  "eligible": "8.0.5"
+}
+```
+
+`status`: `passed` | `held-back` | `excluded` | `not-checked`. Terminal marca
+`held-back` com `*` depois do latest, como o bun, e diz o que é instalável.
 
 ---
 

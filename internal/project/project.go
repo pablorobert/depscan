@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/pablorobert/depscan/internal/bunfig"
 	"github.com/pablorobert/depscan/internal/lockfile"
 	"github.com/pablorobert/depscan/internal/model"
 )
@@ -28,6 +29,9 @@ type packageJSON struct {
 type LoadOptions struct {
 	AllowBunSpawn       bool
 	SpawnTimeoutSeconds int
+	// GlobalBunfig is the user-wide bunfig.toml consulted after the project's own for
+	// minimumReleaseAge. Empty skips it, which keeps tests independent of the machine.
+	GlobalBunfig string
 }
 
 // Load reads dir's package.json and lockfile and returns a project whose dependency
@@ -89,6 +93,25 @@ func Load(dir string, opts LoadOptions) *model.Project {
 	}
 
 	p.Deps = res.Deps
+
+	// Only bun's window is read; npm, pnpm and yarn have equivalents that depscan does
+	// not interpret yet, and for them the field stays null.
+	if p.PackageManager == "bun" {
+		policy, err := bunfig.Load(dir, opts.GlobalBunfig)
+		if err != nil {
+			p.AddError(model.ErrInternal, model.PhaseDiscovery,
+				fmt.Sprintf("bunfig.toml could not be read; minimumReleaseAge ignored: %v", err))
+		} else if policy != nil {
+			p.MinimumReleaseAge = &model.MinimumReleaseAge{
+				Seconds:  policy.Seconds,
+				Excludes: policy.Excludes,
+				Source:   policy.Source,
+			}
+			if p.MinimumReleaseAge.Excludes == nil {
+				p.MinimumReleaseAge.Excludes = []string{}
+			}
+		}
+	}
 	return p
 }
 

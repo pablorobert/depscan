@@ -149,6 +149,46 @@ depscan --offline ~/projects
 Makes zero requests. Anything the cache can answer is answered; everything else comes
 back as `not_checked` with a `cache_miss_offline` error, never as a clean result.
 
+### Minimum release age (bun)
+
+bun can refuse versions published too recently, a guard against a compromised package
+being installed before anyone notices:
+
+```toml
+# bunfig.toml in the project, or ~/.bunfig.toml ($XDG_CONFIG_HOME/.bunfig.toml)
+[install]
+minimumReleaseAge = 259200             # seconds: 72h
+minimumReleaseAgeExcludes = ["@types/node"]
+```
+
+With a window in effect, the registry's `latest` may not be what `bun update` installs
+today. depscan reads the window for bun projects (the project's `bunfig.toml` wins over
+the global one, key by key) and marks a `latest` inside it with `*`, the way
+`bun outdated` does:
+
+```text
+⚠ boletim-app
+    19 outdated
+      @babel/core              7.29.7 → 8.0.6*   major  (installable: 7.29.7 in range, 8.0.5 latest)
+      eslint                   10.10.0 → 10.11.0* minor  (nothing installable yet)
+      zod                      4.6.2 → 4.6.5    patch
+      * published less than 72h ago; bun skips it (minimumReleaseAge in /home/user/.bunfig.toml)
+```
+
+`latest` itself stays the registry's answer; the window's effect is reported beside it
+in `releaseAge`, and `wanted` becomes the highest in-range version **outside** the
+window — what `bun update` would take.
+
+Publish dates exist only in the full packument, so the check costs one extra request
+per outdated package of a bun project with a window, and nothing otherwise. The cache
+keeps only versions and dates, a few kilobytes per package. Since that request already
+carries every version, `wanted` for those packages is computed without `--wanted`.
+
+Only bun's setting is read. pnpm (`minimumReleaseAge`), yarn (`npmMinimalAgeGate`) and
+npm (`before`, a date rather than a window) have their own mechanisms, which depscan
+ignores for now: their projects get `minimumReleaseAge: null` and no `*`, even when
+such a setting is in effect.
+
 ## JSON output
 
 `--json` writes exactly one JSON document to stdout. Progress, warnings and diagnostics
@@ -168,6 +208,7 @@ go to stderr, so `depscan --json . | jq` works.
       "packageManager": "bun",
       "lockfile": "bun.lock",
       "workspaceRoot": null,
+      "minimumReleaseAge": { "seconds": 259200, "excludes": [], "source": "/home/user/.bunfig.toml" },
       "outdated": {
         "status": "findings",
         "packages": [
@@ -181,7 +222,12 @@ go to stderr, so `depscan --json . | jq` works.
             "latestUpdateType": "major",
             "wantedSource": "registry",
             "direct": true,
-            "category": "dependency"
+            "category": "dependency",
+            "releaseAge": {
+              "status": "passed",
+              "latestPublishedAt": "2026-08-30T17:12:04Z",
+              "eligible": "1.20.0"
+            }
           }
         ]
       },
@@ -240,6 +286,10 @@ Notes on the schema:
   copy (hoisted in `bun.lock`/`package-lock.json`, listed under the importer in
   `pnpm-lock.yaml`, matching the declared range in `yarn.lock`) is direct. The nested
   one is transitive: audited for vulnerabilities, never reported as outdated.
+- `minimumReleaseAge` (project) and `releaseAge` (outdated package) are `null` unless
+  the project is a bun project with a window. `releaseAge.status` is `passed`,
+  `held-back` (the `*`), `excluded` or `not-checked`; `eligible` is the newest version
+  outside the window, `null` when none is or when it was not checked.
 - `fixedVersion` is **derived**, not reported by the registry: it is the upper bound of
   the vulnerable range. When the range has an inclusive or absent upper bound the field
   is `null` rather than a guess. `fixedVersionInferred` marks the derivation.
@@ -372,6 +422,8 @@ the default.
 - Outdated reporting covers **direct** dependencies only; bumping a transitive version
   is not something a project can do directly. Vulnerability scanning covers the entire
   lockfile, transitive dependencies included.
+- Minimum release age is only honoured for bun. npm, pnpm and yarn projects are
+  compared against the plain `latest` even when their own config sets a window.
 - Workspace members are discovered as independent projects and tagged with
   `workspaceRoot`. Dependency relationships between workspace packages are not resolved.
 - `fixedVersion` is inferred from the vulnerable range, not reported by the registry.

@@ -143,6 +143,115 @@ func (c *Client) VersionsBatch(ctx context.Context, names []string) (map[string]
 	return versions, failure
 }
 
+// Releases maps every published version of a package to its publish time.
+type Releases map[string]time.Time
+
+// ReleasesBatch fetches publish times for every name. Only the full packument carries
+// them — the abbreviated one has a single "modified" date — so this is the most
+// expensive request depscan makes (measured for zod: 460 KB full against 345 KB
+// abbreviated, both gzipped). It is only called for outdated packages of projects
+// whose package manager enforces a minimum release age.
+func (c *Client) ReleasesBatch(ctx context.Context, names []string) (map[string]Releases, map[string]error) {
+	var (
+		mu       sync.Mutex
+		releases = make(map[string]Releases, len(names))
+		failure  = make(map[string]error)
+	)
+
+	c.each(ctx, names, func(name string) {
+		r, err := c.releases(ctx, name)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			failure[name] = err
+			return
+		}
+		releases[name] = r
+	})
+	return releases, failure
+}
+
+// releaseDoc is both the subset of the full packument that is decoded and the shape
+// that is cached: only versions and their times are kept, so a multi-megabyte
+// packument costs a few kilobytes on disk.
+type releaseDoc struct {
+	Versions map[string]json.RawMessage `json:"versions"`
+	Time     map[string]string          `json:"time"`
+}
+
+func (c *Client) releases(ctx context.Context, name string) (Releases, error) {
+	key := "releases:" + name
+	entry, cached := c.cacheGet(cache.BucketRegistry, key)
+
+	if cached && entry.Fresh() {
+		if r, err := releasesFrom(entry.Data); err == nil {
+			return r, nil
+		}
+	}
+
+	if c.offline {
+		if cached {
+			if r, err := releasesFrom(entry.Data); err == nil {
+				return r, nil
+			}
+		}
+		return nil, &Error{
+			Kind: model.ErrCacheMissOffline,
+			Msg:  fmt.Sprintf("%s: offline and no cached publish dates", name),
+		}
+	}
+
+	etag := ""
+	if cached {
+		etag = entry.ETag
+	}
+
+	body, newETag, err := c.get(ctx, c.base+"/"+escapeName(name), "application/json", etag)
+	if err != nil {
+		return nil, err
+	}
+	if body == nil && cached {
+		c.cachePut(cache.BucketRegistry, key, entry.Data, entry.ETag)
+		return releasesFrom(entry.Data)
+	}
+
+	var doc releaseDoc
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, networkErr("%s: malformed packument response", name)
+	}
+	slim := releaseDoc{Versions: make(map[string]json.RawMessage, len(doc.Versions)), Time: make(map[string]string, len(doc.Versions))}
+	for v := range doc.Versions {
+		slim.Versions[v] = json.RawMessage("{}")
+		if t, ok := doc.Time[v]; ok {
+			slim.Time[v] = t
+		}
+	}
+	data, err := json.Marshal(slim)
+	if err != nil {
+		return nil, &Error{Kind: model.ErrInternal, Msg: err.Error()}
+	}
+	c.cachePut(cache.BucketRegistry, key, data, newETag)
+	return releasesFrom(data)
+}
+
+// releasesFrom keeps only versions still published and with a parseable time; the
+// time map also lists unpublished versions and the "created"/"modified" keys.
+func releasesFrom(data []byte) (Releases, error) {
+	var doc releaseDoc
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	out := make(Releases, len(doc.Versions))
+	for v := range doc.Versions {
+		t, err := time.Parse(time.RFC3339, doc.Time[v])
+		if err != nil {
+			continue
+		}
+		out[v] = t
+	}
+	return out, nil
+}
+
 // each runs fn over names with bounded concurrency.
 func (c *Client) each(ctx context.Context, names []string, fn func(string)) {
 	if len(names) == 0 {

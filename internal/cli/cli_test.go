@@ -4,12 +4,27 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/pablorobert/depscan/internal/model"
 )
+
+// TestMain points the global bunfig lookup at an empty directory, so a
+// minimumReleaseAge in the developer's own ~/.bunfig.toml cannot leak into any scan
+// these tests run.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "depscan-xdg-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 func TestParseDefaults(t *testing.T) {
 	cfg, err := Parse([]string{"/projects"}, io.Discard)

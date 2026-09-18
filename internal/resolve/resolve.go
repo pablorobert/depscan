@@ -10,8 +10,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/pablorobert/depscan/internal/advisory"
 	"github.com/pablorobert/depscan/internal/model"
@@ -29,6 +31,9 @@ type Options struct {
 	SkipVulnerable bool
 	// Ignore holds advisory identifiers to drop, either numeric ids or GHSA ids.
 	Ignore map[string]bool
+	// Now is the reference time for minimum release age checks; zero means the
+	// current time. Set by tests.
+	Now time.Time
 }
 
 // Clients bundles the two network clients.
@@ -92,22 +97,69 @@ func resolveOutdated(ctx context.Context, projects []*model.Project, client *reg
 	}
 
 	names := uniqueDirectNames(projects)
-	latest, failures := client.LatestBatch(ctx, names)
+	lk := lookups{
+		versions:        map[string][]string{},
+		versionFailures: map[string]error{},
+		releases:        map[string]registry.Releases{},
+		releaseFailures: map[string]error{},
+	}
+	lk.latest, lk.failures = client.LatestBatch(ctx, names)
 
 	// Second pass, only under --wanted: a package needs its full version list when
 	// latest sits outside the declared range.
-	versions := map[string][]string{}
-	versionFailures := map[string]error{}
 	if opts.Wanted {
-		needed := namesNeedingVersions(projects, latest)
+		needed := namesNeedingVersions(projects, lk.latest)
 		if len(needed) > 0 {
-			versions, versionFailures = client.VersionsBatch(ctx, needed)
+			lk.versions, lk.versionFailures = client.VersionsBatch(ctx, needed)
 		}
 	}
 
-	for _, p := range projects {
-		buildOutdated(p, latest, failures, versions, versionFailures, opts)
+	// Publish dates, only for outdated packages of projects that enforce a minimum
+	// release age: without the dates there is no telling whether latest is installable.
+	if needed := namesNeedingReleases(projects, lk.latest); len(needed) > 0 {
+		lk.releases, lk.releaseFailures = client.ReleasesBatch(ctx, needed)
 	}
+
+	now := opts.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	for _, p := range projects {
+		buildOutdated(p, lk, opts, now)
+	}
+}
+
+// lookups holds every registry answer phase 2 gathered, keyed by package name.
+type lookups struct {
+	latest          map[string]string
+	failures        map[string]error
+	versions        map[string][]string
+	versionFailures map[string]error
+	releases        map[string]registry.Releases
+	releaseFailures map[string]error
+}
+
+// namesNeedingReleases returns the outdated direct packages of every project with a
+// minimum release age, minus the ones that project exempts.
+func namesNeedingReleases(projects []*model.Project, latest map[string]string) []string {
+	set := make(map[string]bool)
+	for _, p := range projects {
+		if p.MinimumReleaseAge == nil {
+			continue
+		}
+		for _, d := range p.Deps {
+			if !d.Direct || !IsRegistryRange(d.Declared) || d.Version == "" {
+				continue
+			}
+			if slices.Contains(p.MinimumReleaseAge.Excludes, d.Name) {
+				continue
+			}
+			if l, ok := latest[d.Name]; ok && ClassifyUpdate(d.Version, l) != model.UpdateNone {
+				set[d.Name] = true
+			}
+		}
+	}
+	return sortedKeys(set)
 }
 
 // uniqueDirectNames collects every direct dependency name that can be compared against
@@ -151,14 +203,10 @@ func namesNeedingVersions(projects []*model.Project, latest map[string]string) [
 }
 
 // buildOutdated assembles one project's outdated list.
-func buildOutdated(
-	p *model.Project,
-	latest map[string]string,
-	failures map[string]error,
-	versions map[string][]string,
-	versionFailures map[string]error,
-	opts Options,
-) {
+func buildOutdated(p *model.Project, lk lookups, opts Options, now time.Time) {
+	latest, failures := lk.latest, lk.failures
+	versions, versionFailures := lk.versions, lk.versionFailures
+
 	var (
 		out      []model.OutdatedPackage
 		hadError bool
@@ -244,6 +292,12 @@ func buildOutdated(
 			entry.UpdateType = model.UpdateUnknown
 		}
 
+		if p.MinimumReleaseAge != nil {
+			if applyReleaseAge(p, d, &entry, lk, now) {
+				hadError = true
+			}
+		}
+
 		out = append(out, entry)
 	}
 
@@ -258,6 +312,79 @@ func buildOutdated(
 	default:
 		p.Outdated.Status = model.StatusClean
 	}
+}
+
+// applyReleaseAge checks entry.Latest against the project's minimum release age and,
+// when the publish dates are known, recomputes Wanted the way the package manager
+// would: the highest in-range version that is outside the window. It reports whether
+// an error was recorded on the project.
+//
+// Matches what `bun outdated` shows with minimumReleaseAge set (verified with bun
+// 1.4.2): a held-back latest is marked, and the version bun falls back to is the
+// newest stable release no newer than latest and older than the window.
+func applyReleaseAge(p *model.Project, d model.Dep, entry *model.OutdatedPackage, lk lookups, now time.Time) bool {
+	policy := p.MinimumReleaseAge
+	if slices.Contains(policy.Excludes, d.Name) {
+		entry.ReleaseAge = &model.ReleaseAgeCheck{Status: model.ReleaseAgeExcluded}
+		return false
+	}
+
+	rel, ok := lk.releases[d.Name]
+	if !ok {
+		entry.ReleaseAge = &model.ReleaseAgeCheck{Status: model.ReleaseAgeNotChecked}
+		if err := lk.releaseFailures[d.Name]; err != nil {
+			p.AddError(errorKind(err), model.PhaseOutdated,
+				fmt.Sprintf("minimumReleaseAge not checked: %v", err))
+			return true
+		}
+		return false
+	}
+
+	check := &model.ReleaseAgeCheck{Status: model.ReleaseAgeNotChecked}
+	entry.ReleaseAge = check
+	published, ok := rel[entry.Latest]
+	if !ok {
+		return false
+	}
+	stamp := published.UTC().Format(time.RFC3339)
+	check.LatestPublishedAt = &stamp
+
+	cutoff := now.Add(-time.Duration(policy.Seconds) * time.Second)
+	eligible := make([]string, 0, len(rel))
+	for v, t := range rel {
+		if !t.After(cutoff) {
+			eligible = append(eligible, v)
+		}
+	}
+
+	heldBack := published.After(cutoff)
+	if heldBack {
+		check.Status = model.ReleaseAgeHeldBack
+		// A prerelease latest admits prereleases, a stable one does not; the
+		// constraint carries that through MaxInRange.
+		if v, found := MaxInRange("<="+entry.Latest, eligible); found {
+			check.Eligible = &v
+		}
+	} else {
+		check.Status = model.ReleaseAgePassed
+		latest := entry.Latest
+		check.Eligible = &latest
+	}
+
+	// Wanted proven equal to latest no longer holds once latest is held back, and a
+	// wanted that was not computed can be now: the full version list is at hand.
+	if heldBack || entry.WantedSource == model.WantedNotComputed {
+		if w, found := MaxInRange(d.Declared, eligible); found {
+			entry.Wanted = &w
+			entry.WantedSource = model.WantedRegistry
+			entry.UpdateType = ClassifyUpdate(d.Version, w)
+		} else {
+			entry.Wanted = nil
+			entry.WantedSource = model.WantedNotComputed
+			entry.UpdateType = model.UpdateUnknown
+		}
+	}
+	return false
 }
 
 // resolveSecurity issues the bulk advisory query for every package version in the
