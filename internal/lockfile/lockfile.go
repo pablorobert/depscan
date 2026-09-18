@@ -125,27 +125,74 @@ func Parse(dir string, declared map[string]Declared, opts ParseOptions) (*Result
 type resolvedEntry struct {
 	Name    string
 	Version string
+	// TopLevel marks the copy the project itself resolved to, as opposed to a copy
+	// nested under another package ("react-doctor/oxlint" in bun.lock,
+	// "node_modules/a/node_modules/b" in package-lock.json). Only a top-level copy can
+	// be the direct dependency.
+	TopLevel bool
+	// Ranges lists the requested ranges this entry satisfies, for lockfiles keyed by
+	// descriptor (yarn) rather than by install location. A declared range found here
+	// identifies the direct copy the same way TopLevel does.
+	Ranges []string
 }
 
 // merge joins the lockfile's resolved entries with the declared ranges, marking direct
 // dependencies and their category. A declared dependency missing from the lockfile is
 // still reported, with an empty resolved version, so it is never silently dropped.
+//
+// Direct is decided per entry, not per name: a project that declares zod ^4 while a
+// tool pulls in zod 3 nested has one direct zod and one transitive zod. Matching by
+// name alone would report the nested copy as an outdated direct dependency.
 func merge(resolved []resolvedEntry, declared map[string]Declared) []model.Dep {
-	seen := make(map[string]bool, len(resolved))
-	deps := make([]model.Dep, 0, len(resolved))
+	index := make(map[string]int, len(resolved))
+	entries := make([]resolvedEntry, 0, len(resolved))
 
 	for _, r := range resolved {
 		if r.Name == "" || r.Version == "" {
 			continue
 		}
+		// The same name@version can appear both hoisted and nested; it is one package
+		// version, top-level if any of its copies is.
 		key := r.Name + "@" + r.Version
-		if seen[key] {
+		if i, ok := index[key]; ok {
+			entries[i].TopLevel = entries[i].TopLevel || r.TopLevel
+			entries[i].Ranges = append(entries[i].Ranges, r.Ranges...)
 			continue
 		}
-		seen[key] = true
+		index[key] = len(entries)
+		entries = append(entries, r)
+	}
 
-		d := model.Dep{Name: r.Name, Version: r.Version}
-		if dec, ok := declared[r.Name]; ok {
+	byName := make(map[string][]int, len(entries))
+	for i, e := range entries {
+		byName[e.Name] = append(byName[e.Name], i)
+	}
+
+	direct := make([]bool, len(entries))
+	for name, dec := range declared {
+		candidates := byName[name]
+		matched := false
+		for _, i := range candidates {
+			if entries[i].TopLevel || satisfiesDescriptor(entries[i].Ranges, dec.Range) {
+				direct[i] = true
+				matched = true
+			}
+		}
+		if !matched {
+			// The lockfile did not say which copy is the project's own (an old format,
+			// or a range written differently from the descriptor). Marking every copy
+			// direct can over-report, but never hides the declared dependency.
+			for _, i := range candidates {
+				direct[i] = true
+			}
+		}
+	}
+
+	deps := make([]model.Dep, 0, len(entries))
+	for i, e := range entries {
+		d := model.Dep{Name: e.Name, Version: e.Version}
+		if direct[i] {
+			dec := declared[e.Name]
 			d.Direct = true
 			d.Declared = dec.Range
 			d.Category = dec.Category
@@ -154,12 +201,8 @@ func merge(resolved []resolvedEntry, declared map[string]Declared) []model.Dep {
 	}
 
 	// A declared dependency with no lockfile entry: keep it visible with no version.
-	haveName := make(map[string]bool, len(deps))
-	for _, d := range deps {
-		haveName[d.Name] = true
-	}
 	for name, dec := range declared {
-		if !haveName[name] {
+		if len(byName[name]) == 0 {
 			deps = append(deps, model.Dep{
 				Name:     name,
 				Declared: dec.Range,
@@ -176,6 +219,18 @@ func merge(resolved []resolvedEntry, declared map[string]Declared) []model.Dep {
 		return deps[i].Version < deps[j].Version
 	})
 	return deps
+}
+
+// satisfiesDescriptor reports whether a declared range is one of the ranges a
+// descriptor-keyed entry was resolved for. Yarn berry prefixes registry ranges with
+// "npm:", which package.json does not.
+func satisfiesDescriptor(ranges []string, declared string) bool {
+	for _, r := range ranges {
+		if r == declared || strings.TrimPrefix(r, "npm:") == declared {
+			return true
+		}
+	}
+	return false
 }
 
 // splitNameVersion splits an "name@version" identifier, tolerating scoped names such

@@ -235,6 +235,11 @@ Notes on the schema:
 - `direct` and `category` are independent. `category` is the `package.json` section
   (`dependency`, `devDependency`, `peerDependency`, `optionalDependency`); a transitive
   dependency has `direct: false` and `category: null`. `transitive` is never a category.
+- `direct` is decided per installed copy, not per name. When a project declares zod ^4
+  and a tool it uses pulls in zod 3, the lockfile holds both; only the project's own
+  copy (hoisted in `bun.lock`/`package-lock.json`, listed under the importer in
+  `pnpm-lock.yaml`, matching the declared range in `yarn.lock`) is direct. The nested
+  one is transitive: audited for vulnerabilities, never reported as outdated.
 - `fixedVersion` is **derived**, not reported by the registry: it is the upper bound of
   the vulnerable range. When the range has an inclusive or absent upper bound the field
   is `null` rather than a guess. `fixedVersionInferred` marks the derivation.
@@ -384,7 +389,7 @@ the default.
 
 ```bash
 go build ./...
-go test ./...          # 140 tests, no network access required
+go test ./...          # no network access required
 go test ./... -race    # needs cgo and a C toolchain
 go vet ./...
 gofmt -l .

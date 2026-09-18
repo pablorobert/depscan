@@ -177,6 +177,161 @@ func TestParseNPMNestedKeepsBothVersions(t *testing.T) {
 	}
 }
 
+// directVersions returns the versions of name that were marked direct.
+func directVersions(deps []model.Dep, name string) []string {
+	var out []string
+	for _, d := range deps {
+		if d.Name == name && d.Direct {
+			out = append(out, d.Version)
+		}
+	}
+	return out
+}
+
+// TestNestedCopyOfDeclaredDepIsTransitive covers a project that declares zod ^4 while
+// one of its tools pulls in zod 3. Only the project's own copy is direct; before, both
+// were, and the nested one showed up as an outdated direct dependency with a bogus
+// major update.
+func TestNestedCopyOfDeclaredDepIsTransitive(t *testing.T) {
+	cases := []struct {
+		file, content string
+	}{
+		{"bun.lock", `{
+  "lockfileVersion": 1,
+  "packages": {
+    "zod": ["zod@4.6.2", "", {}, "sha512-a=="],
+    "some-tool": ["some-tool@1.0.0", "", { "dependencies": { "zod": "^3.0.0" } }, "sha512-b=="],
+    "some-tool/zod": ["zod@3.25.76", "", {}, "sha512-c=="],
+  }
+}`},
+		{"package-lock.json", `{
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"zod": "^4.6.2"}},
+    "node_modules/zod": {"version": "4.6.2"},
+    "node_modules/some-tool": {"version": "1.0.0"},
+    "node_modules/some-tool/node_modules/zod": {"version": "3.25.76"}
+  }
+}`},
+		{"package-lock.json", `{
+  "lockfileVersion": 1,
+  "dependencies": {
+    "zod": {"version": "4.6.2"},
+    "some-tool": {"version": "1.0.0", "dependencies": {"zod": {"version": "3.25.76"}}}
+  }
+}`},
+		{"pnpm-lock.yaml", `lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      zod:
+        specifier: ^4.6.2
+        version: 4.6.2
+packages:
+  zod@4.6.2:
+    resolution: {integrity: sha512-a==}
+  zod@3.25.76:
+    resolution: {integrity: sha512-c==}
+`},
+		{"pnpm-lock.yaml", `lockfileVersion: '6.0'
+dependencies:
+  zod:
+    specifier: ^4.6.2
+    version: 4.6.2
+packages:
+  /zod@4.6.2:
+    resolution: {integrity: sha512-a==}
+  /zod@3.25.76:
+    resolution: {integrity: sha512-c==}
+`},
+		{"yarn.lock", `# yarn lockfile v1
+
+zod@^3.0.0:
+  version "3.25.76"
+
+zod@^4.0.0, zod@^4.6.2:
+  version "4.6.2"
+`},
+		{"yarn.lock", `__metadata:
+  version: 8
+
+"zod@npm:^3.0.0":
+  version: 3.25.76
+
+"zod@npm:^4.6.2":
+  version: 4.6.2
+`},
+	}
+
+	for _, c := range cases {
+		t.Run(c.file+"/"+c.content[:24], func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, c.file), []byte(c.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			declared := map[string]Declared{"zod": {Range: "^4.6.2", Category: model.CategoryProd}}
+			res, err := Parse(dir, declared, ParseOptions{})
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if !findVersion(res.Deps, "zod", "3.25.76") {
+				t.Fatal("the nested copy must still be listed, for the vulnerability scan")
+			}
+			if got := directVersions(res.Deps, "zod"); len(got) != 1 || got[0] != "4.6.2" {
+				t.Fatalf("direct zod versions = %v, want only 4.6.2", got)
+			}
+		})
+	}
+}
+
+func TestParseNPMNestedMarksOnlyHoistedCopyDirect(t *testing.T) {
+	declared := map[string]Declared{
+		"axios":           {Range: "^1.6.0", Category: model.CategoryProd},
+		"legacy-consumer": {Range: "^1.0.0", Category: model.CategoryProd},
+	}
+	res, err := Parse(fixture(t, "npm-nested"), declared, ParseOptions{})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := directVersions(res.Deps, "axios"); len(got) != 1 || got[0] != "1.6.0" {
+		t.Fatalf("direct axios versions = %v, want only 1.6.0", got)
+	}
+}
+
+// TestUnknownPlacementFallsBackToEveryCopy covers a lockfile that does not say which
+// copy is the project's own: every copy stays direct rather than the declared
+// dependency disappearing from the outdated report.
+func TestUnknownPlacementFallsBackToEveryCopy(t *testing.T) {
+	resolved := []resolvedEntry{
+		{Name: "zod", Version: "3.25.76"},
+		{Name: "zod", Version: "4.6.2"},
+	}
+	deps := merge(resolved, map[string]Declared{"zod": {Range: "^4.6.2", Category: model.CategoryProd}})
+	if got := directVersions(deps, "zod"); len(got) != 2 {
+		t.Fatalf("direct zod versions = %v, want both", got)
+	}
+}
+
+func TestParseBunPmLsMarksNestedCopies(t *testing.T) {
+	// Shape verified against bun 1.4.2 with debug@2.6.9 (which wants ms@2.0.0) next to
+	// a declared ms@2.1.3.
+	out := []byte("C:\\projects\\app node_modules\n" +
+		"├── debug@2.6.9\n" +
+		"│   └── ms@2.0.0\n" +
+		"└── ms@2.1.3\n")
+
+	top := map[string]bool{}
+	for _, e := range parseBunPmLs(out) {
+		top[e.Name+"@"+e.Version] = e.TopLevel
+	}
+	want := map[string]bool{"debug@2.6.9": true, "ms@2.0.0": false, "ms@2.1.3": true}
+	for k, v := range want {
+		if got, ok := top[k]; !ok || got != v {
+			t.Errorf("%s top-level = %v (present %v), want %v", k, got, ok, v)
+		}
+	}
+}
+
 func TestParsePNPMv9StripsPeerSuffix(t *testing.T) {
 	declared := map[string]Declared{
 		"axios": {Range: "^1.6.0", Category: model.CategoryProd},

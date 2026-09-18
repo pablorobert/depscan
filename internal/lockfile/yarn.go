@@ -44,11 +44,11 @@ func parseYarnBerry(raw []byte) ([]resolvedEntry, error) {
 		if key == "__metadata" {
 			continue
 		}
-		name := yarnDescriptorName(key)
+		name, ranges := yarnDescriptor(key)
 		if name == "" || !isConcreteVersion(entry.Version) {
 			continue
 		}
-		entries = append(entries, resolvedEntry{Name: name, Version: entry.Version})
+		entries = append(entries, resolvedEntry{Name: name, Version: entry.Version, Ranges: ranges})
 	}
 	return entries, nil
 }
@@ -63,7 +63,10 @@ func parseYarnBerry(raw []byte) ([]resolvedEntry, error) {
 // block that may follow is ignored.
 func parseYarnV1(raw []byte) []resolvedEntry {
 	var entries []resolvedEntry
-	var pendingName string
+	var (
+		pendingName   string
+		pendingRanges []string
+	)
 
 	sc := bufio.NewScanner(bytes.NewReader(raw))
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
@@ -76,7 +79,7 @@ func parseYarnV1(raw []byte) []resolvedEntry {
 
 		// A descriptor block header sits at column zero and ends with a colon.
 		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
-			pendingName = yarnDescriptorName(strings.TrimSuffix(strings.TrimSpace(line), ":"))
+			pendingName, pendingRanges = yarnDescriptor(strings.TrimSuffix(strings.TrimSpace(line), ":"))
 			continue
 		}
 
@@ -88,7 +91,7 @@ func parseYarnV1(raw []byte) []resolvedEntry {
 			version := strings.TrimSpace(strings.TrimPrefix(trimmed, "version"))
 			version = strings.Trim(version, `"' `)
 			if isConcreteVersion(version) {
-				entries = append(entries, resolvedEntry{Name: pendingName, Version: version})
+				entries = append(entries, resolvedEntry{Name: pendingName, Version: version, Ranges: pendingRanges})
 			}
 			pendingName = ""
 		}
@@ -96,15 +99,20 @@ func parseYarnV1(raw []byte) []resolvedEntry {
 	return entries
 }
 
-// yarnDescriptorName extracts the package name from one or more comma-separated yarn
-// descriptors, handling both "axios@^1.6.0" and the berry "axios@npm:^1.6.0" shape,
-// as well as scoped names.
-func yarnDescriptorName(key string) string {
-	first := key
-	if i := strings.IndexByte(first, ','); i >= 0 {
-		first = first[:i]
+// yarnDescriptor extracts the package name and every requested range from one or more
+// comma-separated yarn descriptors, handling both "axios@^1.6.0" and the berry
+// "axios@npm:^1.6.0" shape, as well as scoped names. yarn.lock is keyed by what was
+// asked for, not by install location, so the ranges are the only way to tell the
+// project's own copy from one a dependency asked for.
+func yarnDescriptor(key string) (name string, ranges []string) {
+	for part := range strings.SplitSeq(key, ",") {
+		n, r := splitNameVersion(strings.Trim(strings.TrimSpace(part), `"'`))
+		if name == "" {
+			name = n
+		}
+		if n == name && r != "" {
+			ranges = append(ranges, r)
+		}
 	}
-	first = strings.Trim(strings.TrimSpace(first), `"'`)
-	name, _ := splitNameVersion(first)
-	return name
+	return name, ranges
 }

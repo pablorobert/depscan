@@ -50,14 +50,20 @@ func parseNPM(path string) ([]resolvedEntry, error) {
 			if name == "" || !isConcreteVersion(pkg.Version) {
 				continue
 			}
-			entries = append(entries, resolvedEntry{Name: name, Version: pkg.Version})
+			// "node_modules/a/node_modules/b" is a copy nested under a; only
+			// "node_modules/b" is the project's own.
+			entries = append(entries, resolvedEntry{
+				Name:     name,
+				Version:  pkg.Version,
+				TopLevel: key == "node_modules/"+name,
+			})
 		}
 		return entries, nil
 	}
 
 	if len(lock.Dependencies) > 0 {
 		var entries []resolvedEntry
-		collectNPMv1(lock.Dependencies, &entries)
+		collectNPMv1(lock.Dependencies, true, &entries)
 		return entries, nil
 	}
 
@@ -79,14 +85,15 @@ func npmNameFromPath(key string) string {
 	return key[i+len(marker):]
 }
 
-// collectNPMv1 walks the recursive dependency tree used by lockfileVersion 1.
-func collectNPMv1(deps map[string]npmV1Dependency, out *[]resolvedEntry) {
+// collectNPMv1 walks the recursive dependency tree used by lockfileVersion 1. Only the
+// outermost level is the project's own node_modules.
+func collectNPMv1(deps map[string]npmV1Dependency, topLevel bool, out *[]resolvedEntry) {
 	for name, dep := range deps {
 		if isConcreteVersion(dep.Version) {
-			*out = append(*out, resolvedEntry{Name: name, Version: dep.Version})
+			*out = append(*out, resolvedEntry{Name: name, Version: dep.Version, TopLevel: topLevel})
 		}
 		if len(dep.Dependencies) > 0 {
-			collectNPMv1(dep.Dependencies, out)
+			collectNPMv1(dep.Dependencies, false, out)
 		}
 	}
 }

@@ -181,7 +181,8 @@ Restrições:
 - **um spawn por projeto**, nunca por dependência
 - sem interpolação de shell; executável localizado e verificado antes
 - timeout (§13)
-- direto vs transitivo vem de cruzar com `package.json`, não da árvore
+- direto vs transitivo vem de cruzar com `package.json` **e** com a posição na árvore:
+  só a entrada de primeiro nível (sem indentação sob outro pacote) pode ser a direta
 - **encapsulado no adapter do Bun.** O núcleo do depscan continua sem conhecer package
   manager. Nenhum outro adapter tem permissão de spawn.
 
@@ -203,6 +204,25 @@ category: dependency | devDependency | peerDependency | optionalDependency | nul
 `category` é a seção do `package.json` onde o pacote foi declarado. Transitivo não tem
 categoria (`direct: false`, `category: null`). **`transitive` não é um valor de
 `category`.**
+
+`direct` é decidido **por cópia instalada, não por nome.** O mesmo nome aparece em mais
+de uma versão quando uma dependência pede outra faixa (projeto declara `zod ^4`, uma
+ferramenta traz `zod 3` aninhado). Só a cópia do próprio projeto é direta:
+
+| Lockfile | Cópia do projeto |
+|---|---|
+| `bun.lock` | chave igual ao nome (`"zod"`); aninhada tem prefixo do pai (`"tool/zod"`) |
+| `bun.lockb` | linha de primeiro nível do `bun pm ls --all` |
+| `package-lock.json` v2/v3 | `node_modules/<nome>`; v1: primeiro nível de `dependencies` |
+| `pnpm-lock.yaml` | versão listada em `importers["."]` (9.0) ou nas seções da raiz (6.0) |
+| `yarn.lock` | entrada cujo descriptor contém o range declarado (`zod@^4.6.2`, `zod@npm:^4.6.2`) |
+
+Se o lockfile não permite distinguir (nenhuma cópia casa), todas as cópias daquele nome
+ficam diretas: pode sobrar linha, mas a dependência declarada nunca some.
+
+Medido: marcar por nome fazia `zod 3.25.76`, `oxlint 1.76.0` e `globals 14.0.0`
+aparecerem como diretos desatualizados num projeto bun real — o último com um "major"
+falso, já que o `globals` declarado estava no latest.
 
 ---
 

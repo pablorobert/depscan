@@ -57,7 +57,13 @@ func parseBunText(path string) ([]resolvedEntry, error) {
 		if !isConcreteVersion(stripPeerSuffix(version)) {
 			continue
 		}
-		entries = append(entries, resolvedEntry{Name: name, Version: stripPeerSuffix(version)})
+		entries = append(entries, resolvedEntry{
+			Name:    name,
+			Version: stripPeerSuffix(version),
+			// A nested resolution is keyed by its parent path, "react-doctor/oxlint";
+			// the project's own copy is keyed by the bare name.
+			TopLevel: key == name,
+		})
 	}
 	return entries, nil
 }
@@ -105,7 +111,12 @@ func parseBunBinary(dir string, opts ParseOptions) ([]resolvedEntry, error) {
 
 // parseBunPmLs extracts name@version pairs from the tree `bun pm ls --all` prints.
 // The first line is a header (the project path plus "node_modules"); every other line
-// is a tree-drawing prefix followed by an identifier.
+// is a tree-drawing prefix followed by an identifier. A hoisted package starts right
+// at the branch, a nested copy is indented under its parent (verified with bun 1.4.2):
+//
+//	├── debug@2.6.9
+//	│   └── ms@2.0.0
+//	└── ms@2.1.3
 func parseBunPmLs(out []byte) []resolvedEntry {
 	var entries []resolvedEntry
 	sc := bufio.NewScanner(bytes.NewReader(out))
@@ -113,6 +124,7 @@ func parseBunPmLs(out []byte) []resolvedEntry {
 
 	for sc.Scan() {
 		line := sc.Text()
+		topLevel := strings.HasPrefix(line, "├") || strings.HasPrefix(line, "└")
 		// Drop the box-drawing prefix and any indentation.
 		line = strings.TrimLeft(line, " │├└─\t")
 		line = strings.TrimSpace(line)
@@ -129,7 +141,7 @@ func parseBunPmLs(out []byte) []resolvedEntry {
 		if name == "" || !isConcreteVersion(version) {
 			continue
 		}
-		entries = append(entries, resolvedEntry{Name: name, Version: version})
+		entries = append(entries, resolvedEntry{Name: name, Version: version, TopLevel: topLevel})
 	}
 	return entries
 }
